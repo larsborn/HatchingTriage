@@ -77,7 +77,7 @@ class HatchingTriageApi:
                     row['kind'],
                     row['private'],
                     row['status'],
-                    datetime.datetime.strptime(row['submitted'], '%Y-%m-%dT%H:%M:%S.%fZ'),
+                    datetime.datetime.strptime(row['submitted'], '%Y-%m-%dT%H:%M:%SZ'),
                     row['tasks'] if 'tasks' in row.keys() else None
                 )
             if not use_pagination:
