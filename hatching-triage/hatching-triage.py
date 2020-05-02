@@ -187,7 +187,11 @@ if __name__ == '__main__':
                     with open(report_file_name, 'r') as fp:
                         report = json.load(fp)
                 else:
-                    report = api.report(feed_item.id)
+                    try:
+                        report = api.report(feed_item.id)
+                    except HatchingTriageException:
+                        logger.error(F'Cannot retrieve report for {feed_item.id}, skipping.')
+                        continue
                     with open(report_file_name, 'w') as fp:
                         json.dump(report, fp)
 
