@@ -6,6 +6,10 @@ import datetime
 import json
 import hashlib
 import socket
+import enum
+import time
+import webbrowser
+import typing
 
 import requests
 import requests.adapters
@@ -20,15 +24,98 @@ class FixedTimeoutAdapter(requests.adapters.HTTPAdapter):
         return super(FixedTimeoutAdapter, self).send(*pargs, **kwargs)
 
 
+class EnumFactory:
+    @staticmethod
+    def get_by_member_value(enum_class, value):
+        for enum_member in enum_class:
+            if enum_member.value == value:
+                return enum_member
+
+
+@enum.unique
+class HatchingTriageSubmissionKind(enum.Enum):
+    File = 'file'
+    Url = 'url'
+    Fetch = 'fetch'
+
+
+@enum.unique
+class HatchingTriageSubmissionStatus(enum.Enum):
+    # A sample has been submitted and is queued for static analysis or the static analysis is in progress.
+    Pending = 'pending'
+
+    # The static analysis report is ready. The sample will remain in this status until a profile is selected.
+    Static_analysis = 'static_analysis'
+
+    # All parameters for sandbox analysis have been selected. The sample is scheduled for running on the sandbox.
+    Scheduled = 'scheduled'
+
+    # The sandbox has finished running the sample and the resulting metrics are being processed into reports.
+    Processing = 'processing'
+
+    # The sample is being run by the sandbox.
+    Running = 'running'
+
+    # The sample has reports that can be retrieved. This status is terminal.
+    Reported = 'reported'
+
+    # Analysis of the sample has failed. Any other status may transition into this status. This status is terminal.
+    Failed = 'failed'
+
+
+class HatchingSampleId:
+    def __init__(self, value):
+        self.value = value
+
+
+class HatchingTriageSubmissionResponse:
+    def __init__(
+            self,
+            hatching_id: HatchingSampleId,
+            status: HatchingTriageSubmissionStatus,
+            kind: HatchingTriageSubmissionKind,
+            filename: str,
+            private: bool,
+            submitted: datetime.datetime,
+    ):
+        self.id = hatching_id
+        self.status = status
+        self.kind = kind
+        self.filename = filename
+        self.private = private
+        self.submitted = submitted
+
+    @staticmethod
+    def from_response(j):
+        return HatchingTriageSubmissionResponse(
+            HatchingSampleId(j['id']),
+            EnumFactory.get_by_member_value(HatchingTriageSubmissionStatus, j['status']),
+            EnumFactory.get_by_member_value(HatchingTriageSubmissionKind, j['kind']),
+            j['filename'],
+            j['private'],
+            datetime.datetime.strptime(j['submitted'], '%Y-%m-%dT%H:%M:%SZ')
+        )
+
+    def __repr__(self):
+        return F'<HatchingTriageSubmissionResponse ' \
+               F'id="{self.id}" ' \
+               F'status={self.status.name} ' \
+               F'kind={self.kind.name} ' \
+               F'filename="{self.filename}" ' \
+               F'private={self.private} ' \
+               F'submitted="{self.submitted.strftime("%Y-%m-%d %H:%M:%S")}" ' \
+               F'>'
+
+
 class HatchingTriageException(Exception):
     pass
 
 
 class FeedItem:
-    def __init__(self, completed, filename, id, kind, private, status, submitted, tasks):
+    def __init__(self, completed, filename, feed_id: HatchingSampleId, kind, private, status, submitted, tasks):
         self.completed = completed
         self.filename = filename
-        self.id = id
+        self.id = feed_id
         self.kind = kind
         self.private = private
         self.status = status
@@ -36,11 +123,12 @@ class FeedItem:
         self.tasks = tasks
 
     def __repr__(self):
-        return F'<FeedItem {self.id}, {self.submitted.strftime("%Y-%m-%d %H:%M:%S")}: {self.filename}>'
+        return F'<FeedItem {self.id.value}, {self.submitted.strftime("%Y-%m-%d %H:%M:%S")}: {self.filename}>'
 
 
 class HatchingTriageApi:
     BASE_URL = 'https://api.tria.ge/v0'
+    REPORT_BASE_URL = 'https://tria.ge'
     MAX_LIMIT = 200
 
     def __init__(self, user_agent: str, access_key: str):
@@ -52,7 +140,26 @@ class HatchingTriageApi:
             'User-Agent': user_agent,
         }
 
-    def feed(self, owned: bool = False, limit: int = MAX_LIMIT, use_pagination=False):
+    def detonate_file(self, file_content: bytes, interactive: bool = False) -> HatchingTriageSubmissionResponse:
+        response = self.session.post(
+            F'{self.BASE_URL}/samples',
+            files={'file': file_content},
+            data={'__json': json.dumps({
+                'kind': HatchingTriageSubmissionKind.File.value,
+                'interactive': interactive,
+            })}
+        )
+        return HatchingTriageSubmissionResponse.from_response(response.json())
+
+    def sample_status(self, sample_id: HatchingSampleId) -> HatchingTriageSubmissionResponse:
+        return HatchingTriageSubmissionResponse.from_response(
+            self.session.get(F'{self.BASE_URL}/samples/{sample_id.value}').json()
+        )
+
+    def get_triage_report_url(self, sample_id: HatchingSampleId) -> str:
+        return F'{self.REPORT_BASE_URL}/{sample_id.value}'
+
+    def feed(self, owned: bool = False, limit: int = MAX_LIMIT, use_pagination=False) -> typing.Iterable[FeedItem]:
         offset = None
         while True:
             params = {
@@ -61,10 +168,7 @@ class HatchingTriageApi:
             }
             if offset:
                 params['offset'] = offset
-            response = self.session.get(
-                F'{self.BASE_URL}/samples',
-                params=params
-            )
+            response = self.session.get(F'{self.BASE_URL}/samples', params=params)
             if response.status_code != 200:
                 raise HatchingTriageException(F'Api-Exception: {response.content}')
             j = response.json()
@@ -73,7 +177,7 @@ class HatchingTriageApi:
                     datetime.datetime.strptime(row['completed'], '%Y-%m-%dT%H:%M:%SZ')
                     if 'completed' in row.keys() else None,
                     row['filename'] if 'filename' in row.keys() else None,
-                    row['id'],
+                    HatchingSampleId(row['id']),
                     row['kind'],
                     row['private'],
                     row['status'],
@@ -110,6 +214,32 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest='command')
 
+    submit_parser = subparsers.add_parser('submit', help='Upload sample for detonation.')
+    submit_parser.add_argument(
+        'target',
+        help='File on disk to detonate or URL on the internet to detonate or download and detonate'
+    )
+    kind_values = [kind.value for kind in HatchingTriageSubmissionKind]
+    submit_parser.add_argument(
+        '-k', '--kind',
+        choices=kind_values,
+        help=F'Possible values: {", ".join(kind_values)}',
+        default=HatchingTriageSubmissionKind.File.value
+    )
+    submit_parser.add_argument('-i', '--interactive', help='File to be uploaded')
+    submit_parser.add_argument(
+        '-p', '--poll', action='store_true',
+        help='If specified, the script will poll for the task to be finished.'
+    )
+    submit_parser.add_argument(
+        '-b', '--browser', action='store_true',
+        help='If specified (in combination with -p), the script will open a web browser when the task is done.'
+    )
+    submit_parser.add_argument(
+        '--sleep-time', type=int, default=10,
+        help='Specify the time in seconds to sleep between pools for status.'
+    )
+
     feed_parser = subparsers.add_parser('feed', help='Retrieve the public feed of samples.')
     feed_parser.add_argument('-o', '--owned', action='store_true', help='Only show files owned by user.')
 
@@ -140,7 +270,33 @@ if __name__ == '__main__':
     logger.debug(F'Using User-Agent string: {args.user_agent}')
     api = HatchingTriageApi(args.user_agent, args.access_key)
     try:
-        if args.command == 'feed':
+        if args.command == 'submit':
+            kind = EnumFactory.get_by_member_value(HatchingTriageSubmissionKind, args.kind)
+            if kind == HatchingTriageSubmissionKind.File:
+                with open(args.target, 'rb') as fp:
+                    content = fp.read()
+                api_response = api.detonate_file(content)
+            elif kind == HatchingTriageSubmissionKind.Url:
+                raise NotImplementedError('submission kind "url" not implemented')
+            elif kind == HatchingTriageSubmissionKind.Fetch:
+                raise NotImplementedError('submission kind "fetch" not implemented')
+            else:
+                raise HatchingTriageException(F'Invalid kind: {args.kind} specified')
+            if args.poll:
+                while api_response.status not in [
+                    HatchingTriageSubmissionStatus.Failed,
+                    HatchingTriageSubmissionStatus.Reported,
+                ]:
+                    time.sleep(args.sleep_time)
+                    api_response = api.sample_status(api_response.id)
+                if api_response.status == HatchingTriageSubmissionStatus.Reported:
+                    logger.info(F'Task with id {api_response.id.value} finished.')
+                    if args.browser:
+                        webbrowser.open(api.get_triage_report_url(api_response.id))
+                else:
+                    logger.error(F'Failed task: {api_response}')
+
+        elif args.command == 'feed':
             for feed_item in api.feed(args.owned):
                 print(feed_item)
 

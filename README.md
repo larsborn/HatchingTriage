@@ -33,6 +33,9 @@ $ hatching --debug scrape .
 $ hatching --debug scrape .
 [DEBUG] Using User-Agent string: HatchingTriageClient/1.0.0 (python-requests 2.23.0) Windows (10)
 [DEBUG] 0 new sample(s) found.
+
+# submit sample, poll for changes and open web browser with report when done
+$ hatching submit -pb 1382fdb29bab4fdfecdead8eb5d85d022a16d4f0286513b226745d890a3f47f4
 ```
 
 [tria.ge]: https://tria.ge/
